@@ -2,7 +2,7 @@ from fastapi import FastAPI, Request, HTTPException
 import uvicorn
 import logging
 import json
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import List, Dict, Any, Optional, Union, Literal
 import httpx
 import os
@@ -20,7 +20,7 @@ load_dotenv()
 
 # Configure logging
 logging.basicConfig(
-    level=logging.WARN,  # Change to INFO level to show more details
+    level=logging.DEBUG,  # Enable DEBUG to trace anthropic model issues
     format='%(asctime)s - %(levelname)s - %(message)s',
 )
 logger = logging.getLogger(__name__)
@@ -85,6 +85,9 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 # Get preferred provider (default to openai)
 PREFERRED_PROVIDER = os.environ.get("PREFERRED_PROVIDER", "openai").lower()
 
+# Get custom OpenAI API base URL for LiteLLM proxy support
+OPENAI_API_BASE = os.environ.get("OPENAI_API_BASE", None)
+
 # Get model mapping configuration from environment
 # Default to latest OpenAI models if not set
 BIG_MODEL = os.environ.get("BIG_MODEL", "gpt-4.1")
@@ -109,7 +112,25 @@ OPENAI_MODELS = [
 # List of Gemini models
 GEMINI_MODELS = [
     "gemini-2.5-pro-preview-03-25",
-    "gemini-2.0-flash"
+    "gemini-2.0-flash",
+    "gemini-2.5-flash-preview-05-20",  # Added user's models
+    "gemini-2.5-pro-preview-05-06"
+]
+
+# List of Anthropic models (for LiteLLM anthropic/ prefix)
+ANTHROPIC_MODELS = [
+    "claude-3-5-sonnet-20241022",
+    "claude-3-5-haiku-20241022",
+    "claude-3-5-sonnet-20240620",
+    "claude-3-5-haiku-20240307",
+    "claude-3-opus-20240229",
+    "claude-sonnet-4-20250514",  # User's models
+    "claude-3-5-haiku-latest",
+    "claude-3-haiku-20240307",
+    "claude-3-sonnet-20240229",
+    "claude-2.1",
+    "claude-2.0",
+    "claude-instant-1.2"
 ]
 
 # Helper function to clean schema for Gemini
@@ -187,6 +208,13 @@ class MessagesRequest(BaseModel):
     thinking: Optional[ThinkingConfig] = None
     original_model: Optional[str] = None  # Will store the original model name
     
+    @model_validator(mode='before')
+    def preserve_original_model(cls, values):
+        """Preserve the original model name before any mapping occurs"""
+        if isinstance(values, dict) and 'model' in values:
+            values['original_model'] = values['model']
+        return values
+    
     @field_validator('model')
     def validate_model_field(cls, v, info): # Renamed to avoid conflict
         original_model = v
@@ -207,25 +235,44 @@ class MessagesRequest(BaseModel):
         mapped = False
         # Map Haiku to SMALL_MODEL based on provider preference
         if 'haiku' in clean_v.lower():
-            if PREFERRED_PROVIDER == "google" and SMALL_MODEL in GEMINI_MODELS:
-                new_model = f"gemini/{SMALL_MODEL}"
+            # Check what type of model SMALL_MODEL is (with or without prefix)
+            small_model_clean = SMALL_MODEL.replace('gemini/', '').replace('openai/', '').replace('anthropic/', '')
+            if PREFERRED_PROVIDER == "google" and small_model_clean in GEMINI_MODELS:
+                # Use SMALL_MODEL as-is if it already has prefix, otherwise add gemini/
+                new_model = SMALL_MODEL if SMALL_MODEL.startswith('gemini/') else f"gemini/{SMALL_MODEL}"
+                mapped = True
+            elif small_model_clean in ANTHROPIC_MODELS:
+                # Use SMALL_MODEL as-is if it already has prefix, otherwise add anthropic/
+                new_model = SMALL_MODEL if SMALL_MODEL.startswith('anthropic/') else f"anthropic/{SMALL_MODEL}"
                 mapped = True
             else:
-                new_model = f"openai/{SMALL_MODEL}"
+                # Use SMALL_MODEL as-is if it already has prefix, otherwise add openai/
+                new_model = SMALL_MODEL if SMALL_MODEL.startswith('openai/') else f"openai/{SMALL_MODEL}"
                 mapped = True
 
         # Map Sonnet to BIG_MODEL based on provider preference
         elif 'sonnet' in clean_v.lower():
-            if PREFERRED_PROVIDER == "google" and BIG_MODEL in GEMINI_MODELS:
-                new_model = f"gemini/{BIG_MODEL}"
+            # Check what type of model BIG_MODEL is (with or without prefix)
+            big_model_clean = BIG_MODEL.replace('gemini/', '').replace('openai/', '').replace('anthropic/', '')
+            if PREFERRED_PROVIDER == "google" and big_model_clean in GEMINI_MODELS:
+                # Use BIG_MODEL as-is if it already has prefix, otherwise add gemini/
+                new_model = BIG_MODEL if BIG_MODEL.startswith('gemini/') else f"gemini/{BIG_MODEL}"
+                mapped = True
+            elif big_model_clean in ANTHROPIC_MODELS:
+                # Use BIG_MODEL as-is if it already has prefix, otherwise add anthropic/
+                new_model = BIG_MODEL if BIG_MODEL.startswith('anthropic/') else f"anthropic/{BIG_MODEL}"
                 mapped = True
             else:
-                new_model = f"openai/{BIG_MODEL}"
+                # Use BIG_MODEL as-is if it already has prefix, otherwise add openai/
+                new_model = BIG_MODEL if BIG_MODEL.startswith('openai/') else f"openai/{BIG_MODEL}"
                 mapped = True
 
         # Add prefixes to non-mapped models if they match known lists
         elif not mapped:
-            if clean_v in GEMINI_MODELS and not v.startswith('gemini/'):
+            if clean_v in ANTHROPIC_MODELS and not v.startswith('anthropic/'):
+                new_model = f"anthropic/{clean_v}"
+                mapped = True # Technically mapped to add prefix
+            elif clean_v in GEMINI_MODELS and not v.startswith('gemini/'):
                 new_model = f"gemini/{clean_v}"
                 mapped = True # Technically mapped to add prefix
             elif clean_v in OPENAI_MODELS and not v.startswith('openai/'):
@@ -241,11 +288,6 @@ class MessagesRequest(BaseModel):
                  logger.warning(f"⚠️ No prefix or mapping rule for model: '{original_model}'. Using as is.")
              new_model = v # Ensure we return the original if no rule applied
 
-        # Store the original model in the values dictionary
-        values = info.data
-        if isinstance(values, dict):
-            values['original_model'] = original_model
-
         return new_model
 
 class TokenCountRequest(BaseModel):
@@ -256,6 +298,13 @@ class TokenCountRequest(BaseModel):
     thinking: Optional[ThinkingConfig] = None
     tool_choice: Optional[Dict[str, Any]] = None
     original_model: Optional[str] = None  # Will store the original model name
+    
+    @model_validator(mode='before')
+    def preserve_original_model(cls, values):
+        """Preserve the original model name before any mapping occurs"""
+        if isinstance(values, dict) and 'model' in values:
+            values['original_model'] = values['model']
+        return values
     
     @field_validator('model')
     def validate_model_token_count(cls, v, info): # Renamed to avoid conflict
@@ -280,25 +329,44 @@ class TokenCountRequest(BaseModel):
         mapped = False
         # Map Haiku to SMALL_MODEL based on provider preference
         if 'haiku' in clean_v.lower():
-            if PREFERRED_PROVIDER == "google" and SMALL_MODEL in GEMINI_MODELS:
-                new_model = f"gemini/{SMALL_MODEL}"
+            # Check what type of model SMALL_MODEL is (with or without prefix)
+            small_model_clean = SMALL_MODEL.replace('gemini/', '').replace('openai/', '').replace('anthropic/', '')
+            if PREFERRED_PROVIDER == "google" and small_model_clean in GEMINI_MODELS:
+                # Use SMALL_MODEL as-is if it already has prefix, otherwise add gemini/
+                new_model = SMALL_MODEL if SMALL_MODEL.startswith('gemini/') else f"gemini/{SMALL_MODEL}"
+                mapped = True
+            elif small_model_clean in ANTHROPIC_MODELS:
+                # Use SMALL_MODEL as-is if it already has prefix, otherwise add anthropic/
+                new_model = SMALL_MODEL if SMALL_MODEL.startswith('anthropic/') else f"anthropic/{SMALL_MODEL}"
                 mapped = True
             else:
-                new_model = f"openai/{SMALL_MODEL}"
+                # Use SMALL_MODEL as-is if it already has prefix, otherwise add openai/
+                new_model = SMALL_MODEL if SMALL_MODEL.startswith('openai/') else f"openai/{SMALL_MODEL}"
                 mapped = True
 
         # Map Sonnet to BIG_MODEL based on provider preference
         elif 'sonnet' in clean_v.lower():
-            if PREFERRED_PROVIDER == "google" and BIG_MODEL in GEMINI_MODELS:
-                new_model = f"gemini/{BIG_MODEL}"
+            # Check what type of model BIG_MODEL is (with or without prefix)
+            big_model_clean = BIG_MODEL.replace('gemini/', '').replace('openai/', '').replace('anthropic/', '')
+            if PREFERRED_PROVIDER == "google" and big_model_clean in GEMINI_MODELS:
+                # Use BIG_MODEL as-is if it already has prefix, otherwise add gemini/
+                new_model = BIG_MODEL if BIG_MODEL.startswith('gemini/') else f"gemini/{BIG_MODEL}"
+                mapped = True
+            elif big_model_clean in ANTHROPIC_MODELS:
+                # Use BIG_MODEL as-is if it already has prefix, otherwise add anthropic/
+                new_model = BIG_MODEL if BIG_MODEL.startswith('anthropic/') else f"anthropic/{BIG_MODEL}"
                 mapped = True
             else:
-                new_model = f"openai/{BIG_MODEL}"
+                # Use BIG_MODEL as-is if it already has prefix, otherwise add openai/
+                new_model = BIG_MODEL if BIG_MODEL.startswith('openai/') else f"openai/{BIG_MODEL}"
                 mapped = True
 
         # Add prefixes to non-mapped models if they match known lists
         elif not mapped:
-            if clean_v in GEMINI_MODELS and not v.startswith('gemini/'):
+            if clean_v in ANTHROPIC_MODELS and not v.startswith('anthropic/'):
+                new_model = f"anthropic/{clean_v}"
+                mapped = True # Technically mapped to add prefix
+            elif clean_v in GEMINI_MODELS and not v.startswith('gemini/'):
                 new_model = f"gemini/{clean_v}"
                 mapped = True # Technically mapped to add prefix
             elif clean_v in OPENAI_MODELS and not v.startswith('openai/'):
@@ -622,15 +690,48 @@ def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any],
     
     # Enhanced response extraction with better error handling
     try:
-        # Get the clean model name to check capabilities
-        clean_model = original_request.model
-        if clean_model.startswith("anthropic/"):
-            clean_model = clean_model[len("anthropic/"):]
-        elif clean_model.startswith("openai/"):
-            clean_model = clean_model[len("openai/"):]
+        # Get the original model name (before mapping) to check capabilities
+        # This determines if the client expects Claude-style tool_use blocks
+        original_model = getattr(original_request, 'original_model', None) or original_request.model
+        clean_original_model = original_model
+        if clean_original_model.startswith("anthropic/"):
+            clean_original_model = clean_original_model[len("anthropic/"):]
+        elif clean_original_model.startswith("openai/"):
+            clean_original_model = clean_original_model[len("openai/"):]
+        elif clean_original_model.startswith("gemini/"):
+            clean_original_model = clean_original_model[len("gemini/"):]
         
-        # Check if this is a Claude model (which supports content blocks)
-        is_claude_model = clean_model.startswith("claude-")
+        # Check if this should be treated as a Claude model (which supports tool_use blocks)
+        # This includes:
+        # 1. Original requests for Claude models (claude-3-5-sonnet, etc.)
+        # 2. Original requests that start with anthropic/ 
+        # 3. Models mapped to anthropic/ providers through LiteLLM
+        
+        # Check original request model
+        is_claude_request = clean_original_model.startswith("claude-") or "claude" in clean_original_model.lower()
+        
+        # Check if the ORIGINAL request was for an anthropic/ model
+        is_anthropic_request = original_model.startswith("anthropic/")
+        
+        # Check if the MAPPED model is an anthropic/ model (through LiteLLM)
+        mapped_model = original_request.model  # This is the final mapped model
+        is_anthropic_mapped = mapped_model.startswith("anthropic/")
+        
+        # A model should get Claude-style tool_use blocks if:
+        # - The original request was for a Claude model, OR
+        # - The original request was for an anthropic/ model, OR
+        # - The mapped model is using anthropic/ provider
+        is_claude_model = is_claude_request or is_anthropic_request or is_anthropic_mapped
+        
+        # Debug logging for model detection
+        logger.debug(f"🤖 CLAUDE MODEL DETECTION:")
+        logger.debug(f"   Original model: {original_model}")
+        logger.debug(f"   Clean original: {clean_original_model}")
+        logger.debug(f"   Mapped model: {mapped_model}")
+        logger.debug(f"   Is Claude request: {is_claude_request}")
+        logger.debug(f"   Is Anthropic request: {is_anthropic_request}")
+        logger.debug(f"   Is Anthropic mapped: {is_anthropic_mapped}")
+        logger.debug(f"   Final is_claude_model: {is_claude_model}")
         
         # Handle ModelResponse object from LiteLLM
         if hasattr(litellm_response, 'choices') and hasattr(litellm_response, 'usage'):
@@ -716,7 +817,7 @@ def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any],
                 })
         elif tool_calls and not is_claude_model:
             # For non-Claude models, convert tool calls to text format
-            logger.debug(f"Converting tool calls to text for non-Claude model: {clean_model}")
+            logger.debug(f"Converting tool calls to text for non-Claude model: {clean_original_model}")
             
             # We'll append tool info to the text content
             tool_text = "\n\nTool usage:\n"
@@ -1079,12 +1180,28 @@ async def create_message(
     raw_request: Request
 ):
     try:
-        # print the body here
+        # Debug: print the body to see what Claude Code is sending
         body = await raw_request.body()
     
         # Parse the raw body as JSON since it's bytes
         body_json = json.loads(body.decode('utf-8'))
         original_model = body_json.get("model", "unknown")
+        
+        # Debug logging for Claude Code requests
+        logger.debug(f"🔍 RAW REQUEST from client:")
+        logger.debug(f"   Model: {original_model}")
+        logger.debug(f"   Messages count: {len(body_json.get('messages', []))}")
+        for i, msg in enumerate(body_json.get('messages', [])):
+            logger.debug(f"   Message {i} ({msg.get('role')}): {type(msg.get('content'))}")
+            if isinstance(msg.get('content'), list):
+                for j, block in enumerate(msg['content']):
+                    logger.debug(f"     Block {j}: {block.get('type')} - {str(block)[:150]}...")
+            elif isinstance(msg.get('content'), str):
+                logger.debug(f"     Content: {msg.get('content')[:100]}...")
+        if body_json.get('tools'):
+            logger.debug(f"   Tools: {[t.get('name') for t in body_json.get('tools', [])]}")
+        logger.debug(f"   Stream: {body_json.get('stream', False)}")
+        logger.debug(f"   Max tokens: {body_json.get('max_tokens')}")
         
         # Get the display name for logging, just the model name without provider prefix
         display_model = original_model
@@ -1106,10 +1223,23 @@ async def create_message(
         # Determine which API key to use based on the model
         if request.model.startswith("openai/"):
             litellm_request["api_key"] = OPENAI_API_KEY
+            # Add custom API base URL if provided
+            if OPENAI_API_BASE:
+                litellm_request["api_base"] = OPENAI_API_BASE
+                logger.debug(f"Using custom OpenAI API base: {OPENAI_API_BASE}")
             logger.debug(f"Using OpenAI API key for model: {request.model}")
         elif request.model.startswith("gemini/"):
             litellm_request["api_key"] = GEMINI_API_KEY
             logger.debug(f"Using Gemini API key for model: {request.model}")
+        elif request.model.startswith("anthropic/"):
+            # For Anthropic models routed through litellm proxy, use OpenAI credentials
+            litellm_request["api_key"] = OPENAI_API_KEY
+            if OPENAI_API_BASE:
+                litellm_request["api_base"] = OPENAI_API_BASE
+                logger.debug(f"Using OpenAI API base for Anthropic model: {OPENAI_API_BASE}")
+            # Force the provider to be openai so litellm uses OpenAI-compatible endpoints
+            litellm_request["custom_llm_provider"] = "openai"
+            logger.debug(f"Using OpenAI credentials and provider for Anthropic model: {request.model}")
         else:
             litellm_request["api_key"] = ANTHROPIC_API_KEY
             logger.debug(f"Using Anthropic API key for model: {request.model}")
@@ -1296,6 +1426,21 @@ async def create_message(
             # Convert LiteLLM response to Anthropic format
             anthropic_response = convert_litellm_to_anthropic(litellm_response, request)
             
+            # Debug the response being sent back to Claude Code
+            logger.debug(f"📤 RESPONSE to client:")
+            logger.debug(f"   Stop reason: {anthropic_response.stop_reason}")
+            logger.debug(f"   Content blocks: {len(anthropic_response.content)}")
+            for i, block in enumerate(anthropic_response.content):
+                if hasattr(block, 'type'):
+                    block_type = block.type
+                    if block_type == 'tool_use':
+                        logger.debug(f"     Block {i}: tool_use - {block.name} (ID: {block.id[:12]}...)")
+                    elif block_type == 'text':
+                        text_preview = block.text[:100] if hasattr(block, 'text') else str(block)[:100]
+                        logger.debug(f"     Block {i}: text - {text_preview}...")
+                else:
+                    logger.debug(f"     Block {i}: {type(block)} - {str(block)[:100]}...")
+            
             return anthropic_response
                 
     except Exception as e:
@@ -1309,19 +1454,35 @@ async def create_message(
             "traceback": error_traceback
         }
         
-        # Check for LiteLLM-specific attributes
+        # Check for LiteLLM-specific attributes with safe serialization
         for attr in ['message', 'status_code', 'response', 'llm_provider', 'model']:
             if hasattr(e, attr):
-                error_details[attr] = getattr(e, attr)
+                attr_value = getattr(e, attr)
+                # Safely convert to string if not JSON serializable
+                try:
+                    json.dumps(attr_value)
+                    error_details[attr] = attr_value
+                except (TypeError, ValueError):
+                    error_details[attr] = str(attr_value)
         
         # Check for additional exception details in dictionaries
         if hasattr(e, '__dict__'):
             for key, value in e.__dict__.items():
                 if key not in error_details and key not in ['args', '__traceback__']:
-                    error_details[key] = str(value)
+                    # Always convert to string for safety
+                    try:
+                        json.dumps(value)
+                        error_details[key] = value
+                    except (TypeError, ValueError):
+                        error_details[key] = str(value)
         
-        # Log all error details
-        logger.error(f"Error processing request: {json.dumps(error_details, indent=2)}")
+        # Log all error details (now safe for JSON serialization)
+        try:
+            logger.error(f"Error processing request: {json.dumps(error_details, indent=2)}")
+        except (TypeError, ValueError) as json_error:
+            # Fallback if there are still serialization issues
+            logger.error(f"Error processing request (JSON serialization failed): {error_details}")
+            logger.error(f"JSON error: {json_error}")
         
         # Format error for response
         error_message = f"Error: {str(e)}"

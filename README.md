@@ -38,6 +38,7 @@ A proxy server that lets you use Anthropic clients with Gemini or OpenAI models 
 
    *   `ANTHROPIC_API_KEY`: (Optional) Needed only if proxying *to* Anthropic models.
    *   `OPENAI_API_KEY`: Your OpenAI API key (Required if using the default OpenAI preference or as fallback).
+   *   `OPENAI_API_BASE`: (Optional) Custom OpenAI API base URL. Use this to point to your own LiteLLM proxy or compatible endpoint.
    *   `GEMINI_API_KEY`: Your Google AI Studio (Gemini) API key (Required if PREFERRED_PROVIDER=google).
    *   `PREFERRED_PROVIDER` (Optional): Set to `openai` (default) or `google`. This determines the primary backend for mapping `haiku`/`sonnet`.
    *   `BIG_MODEL` (Optional): The model to map `sonnet` requests to. Defaults to `gpt-4.1` (if `PREFERRED_PROVIDER=openai`) or `gemini-2.5-pro-preview-03-25`.
@@ -65,7 +66,31 @@ A proxy server that lets you use Anthropic clients with Gemini or OpenAI models 
    ANTHROPIC_BASE_URL=http://localhost:8082 claude
    ```
 
-3. **That's it!** Your Claude Code client will now use the configured backend models (defaulting to Gemini) through the proxy. 🎯
+3. **That's it!** Your Claude Code client will now use the configured backend models (defaulting to OpenAI) through the proxy. 🎯
+
+### Using with LiteLLM Proxy 🔗
+
+You can also use this proxy to connect to your own LiteLLM proxy instance:
+
+1. **Set up your LiteLLM proxy** (running on e.g., http://localhost:4000)
+
+2. **Configure the proxy to use your LiteLLM instance**:
+   ```bash
+   export OPENAI_API_BASE="http://localhost:4000/v1"
+   export OPENAI_API_KEY="your-litellm-api-key"  # Or any key your LiteLLM proxy expects
+   ```
+
+3. **Run the proxy** as usual:
+   ```bash
+   uv run uvicorn server:app --host 0.0.0.0 --port 8082 --reload
+   ```
+
+4. **Connect Claude Code**:
+   ```bash
+   ANTHROPIC_BASE_URL=http://localhost:8082 claude
+   ```
+
+This setup allows you to chain proxies: `Claude Code` → `This Proxy` → `LiteLLM Proxy` → `Multiple LLM Providers` 🔄
 
 ## Model Mapping 🗺️
 
@@ -141,17 +166,47 @@ BIG_MODEL="gpt-4o" # Example specific model
 SMALL_MODEL="gpt-4o-mini" # Example specific model
 ```
 
+**Example 4: Use LiteLLM Proxy**
+```dotenv
+OPENAI_API_KEY="your-litellm-api-key" # Whatever your LiteLLM proxy expects
+OPENAI_API_BASE="http://localhost:4000/v1" # Your LiteLLM proxy URL
+PREFERRED_PROVIDER="openai"
+BIG_MODEL="claude-3-5-sonnet-20241022" # Any model supported by your LiteLLM proxy
+SMALL_MODEL="claude-3-5-haiku-20241022" # Any model supported by your LiteLLM proxy
+```
+
 ## How It Works 🧩
 
-This proxy works by:
+This proxy leverages **LiteLLM** to provide seamless translation between different LLM providers while maintaining Anthropic API compatibility.
+
+### LiteLLM Integration 🔗
+
+The proxy is built on top of [LiteLLM](https://github.com/BerriAI/litellm), a unified interface for calling 100+ LLM APIs. This provides several key benefits:
+
+- **Universal Provider Support**: Connect to OpenAI, Google (Gemini), Anthropic, Azure, AWS Bedrock, and many other providers
+- **Automatic Format Translation**: LiteLLM handles the conversion between different API formats automatically
+- **Consistent Response Structure**: All providers return responses in a standardized format
+- **Built-in Error Handling**: Robust error handling and retry logic across providers
+
+### Request Flow 🌊
+
+The proxy works by:
 
 1. **Receiving requests** in Anthropic's API format 📥
-2. **Translating** the requests to OpenAI format via LiteLLM 🔄
-3. **Sending** the translated request to OpenAI 📤
-4. **Converting** the response back to Anthropic format 🔄
+2. **Model mapping** - translates Claude model names (haiku/sonnet) to target provider models 🗺️
+3. **LiteLLM processing** - uses LiteLLM's unified interface to call the target provider 🔄
+4. **Response formatting** - converts LiteLLM's standardized response back to Anthropic format 🔄
 5. **Returning** the formatted response to the client ✅
 
-The proxy handles both streaming and non-streaming responses, maintaining compatibility with all Claude clients. 🌊
+### Key Features 🚀
+
+- **Streaming Support**: Full support for streaming responses via LiteLLM's streaming capabilities
+- **Provider Fallbacks**: Can fallback between providers (e.g., Google → OpenAI) if needed
+- **Model Prefix Handling**: Automatically adds provider prefixes (`openai/`, `gemini/`) for LiteLLM routing
+- **Flexible Configuration**: Environment-based configuration for easy provider switching
+- **Chain-able**: Can proxy to other LiteLLM instances for complex routing scenarios
+
+The proxy maintains full compatibility with all Claude clients while providing access to the entire LiteLLM ecosystem. 🌟
 
 ## Contributing 🤝
 
