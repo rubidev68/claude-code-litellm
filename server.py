@@ -954,11 +954,16 @@ async def handle_streaming(response_generator, original_request: MessagesRequest
         output_tokens = 0
         has_sent_stop_reason = False
         last_tool_index = 0
+        last_ping = time.time()  # Track last ping time
+        PING_INTERVAL = 30  # Send ping every 30 seconds
         
         # Process each chunk
         async for chunk in response_generator:
             try:
-
+                # Send periodic keep-alive pings to prevent timeout
+                if time.time() - last_ping > PING_INTERVAL:
+                    yield f"event: ping\ndata: {json.dumps({'type': 'ping'})}\n\n"
+                    last_ping = time.time()
                 
                 # Check if this is the end of the response with usage data
                 if hasattr(chunk, 'usage') and chunk.usage is not None:
@@ -1220,6 +1225,10 @@ async def create_message(
         # Convert Anthropic request to LiteLLM format
         litellm_request = convert_anthropic_to_litellm(request)
         
+        # Add timeout configuration for long conversations
+        litellm_request["timeout"] = 600  # 10 minutes
+        litellm_request["request_timeout"] = 600
+        
         # Determine which API key to use based on the model
         if request.model.startswith("openai/"):
             litellm_request["api_key"] = OPENAI_API_KEY
@@ -1402,9 +1411,17 @@ async def create_message(
             # Ensure we use the async version for streaming
             response_generator = await litellm.acompletion(**litellm_request)
             
+            # Add streaming-specific headers to prevent buffering
+            headers = {
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no"  # Disable nginx buffering
+            }
+            
             return StreamingResponse(
                 handle_streaming(response_generator, request),
-                media_type="text/event-stream"
+                media_type="text/event-stream",
+                headers=headers
             )
         else:
             # Use LiteLLM for regular completion
@@ -1622,5 +1639,13 @@ if __name__ == "__main__":
         print("Run with: uvicorn server:app --reload --host 0.0.0.0 --port 8082")
         sys.exit(0)
     
-    # Configure uvicorn to run with minimal logs
-    uvicorn.run(app, host="0.0.0.0", port=8082, log_level="error")
+    # Configure uvicorn to run with minimal logs and streaming timeouts
+    uvicorn.run(
+        app, 
+        host="0.0.0.0", 
+        port=8082, 
+        log_level="error",
+        timeout_keep_alive=300,  # 5 minutes keep-alive for long conversations
+        timeout_graceful_shutdown=30,
+        limit_max_requests=1000
+    )
