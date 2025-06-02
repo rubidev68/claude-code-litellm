@@ -20,7 +20,7 @@ load_dotenv()
 
 # Configure logging
 logging.basicConfig(
-    level=logging.DEBUG,  # Enable DEBUG to trace anthropic model issues
+    level=logging.INFO,  # Changed from DEBUG to INFO
     format='%(asctime)s - %(levelname)s - %(message)s',
 )
 logger = logging.getLogger(__name__)
@@ -65,9 +65,6 @@ class ColorizedFormatter(logging.Formatter):
     BOLD = "\033[1m"
     
     def format(self, record):
-        if record.levelno == logging.debug and "MODEL MAPPING" in record.msg:
-            # Apply colors and formatting to model mapping logs
-            return f"{self.BOLD}{self.GREEN}{record.msg}{self.RESET}"
         return super().format(record)
 
 # Apply custom formatter to console handler
@@ -145,7 +142,6 @@ def clean_gemini_schema(schema: Any) -> Any:
         if schema.get("type") == "string" and "format" in schema:
             allowed_formats = {"enum", "date-time"}
             if schema["format"] not in allowed_formats:
-                logger.debug(f"Removing unsupported format '{schema['format']}' for string type in Gemini schema.")
                 schema.pop("format")
 
         # Recursively clean nested schemas (properties, items, etc.)
@@ -220,7 +216,6 @@ class MessagesRequest(BaseModel):
         original_model = v
         new_model = v # Default to original value
 
-        logger.debug(f"📋 MODEL VALIDATION: Original='{original_model}', Preferred='{PREFERRED_PROVIDER}', BIG='{BIG_MODEL}', SMALL='{SMALL_MODEL}'")
 
         # Remove provider prefixes for easier matching
         clean_v = v
@@ -280,9 +275,7 @@ class MessagesRequest(BaseModel):
                 mapped = True # Technically mapped to add prefix
         # --- Mapping Logic --- END ---
 
-        if mapped:
-            logger.debug(f"📌 MODEL MAPPING: '{original_model}' ➡️ '{new_model}'")
-        else:
+        if not mapped:
              # If no mapping occurred and no prefix exists, log warning or decide default
              if not v.startswith(('openai/', 'gemini/', 'anthropic/')):
                  logger.warning(f"⚠️ No prefix or mapping rule for model: '{original_model}'. Using as is.")
@@ -314,7 +307,6 @@ class TokenCountRequest(BaseModel):
         original_model = v
         new_model = v # Default to original value
 
-        logger.debug(f"📋 TOKEN COUNT VALIDATION: Original='{original_model}', Preferred='{PREFERRED_PROVIDER}', BIG='{BIG_MODEL}', SMALL='{SMALL_MODEL}'")
 
         # Remove provider prefixes for easier matching
         clean_v = v
@@ -374,9 +366,7 @@ class TokenCountRequest(BaseModel):
                 mapped = True # Technically mapped to add prefix
         # --- Mapping Logic --- END ---
 
-        if mapped:
-            logger.debug(f"📌 TOKEN COUNT MAPPING: '{original_model}' ➡️ '{new_model}'")
-        else:
+        if not mapped:
              if not v.startswith(('openai/', 'gemini/', 'anthropic/')):
                  logger.warning(f"⚠️ No prefix or mapping rule for token count model: '{original_model}'. Using as is.")
              new_model = v # Ensure we return the original if no rule applied
@@ -414,7 +404,6 @@ async def log_requests(request: Request, call_next):
     path = request.url.path
     
     # Log only basic request details at debug level
-    logger.debug(f"Request: {method} {path}")
     
     # Process the request and get the response
     response = await call_next(request)
@@ -603,7 +592,6 @@ def convert_anthropic_to_litellm(anthropic_request: MessagesRequest) -> Dict[str
     max_tokens = anthropic_request.max_tokens
     if anthropic_request.model.startswith("openai/") or anthropic_request.model.startswith("gemini/"):
         max_tokens = min(max_tokens, 16384)
-        logger.debug(f"Capping max_tokens to 16384 for OpenAI/Gemini model (original value: {anthropic_request.max_tokens})")
     
     # Create LiteLLM request dict
     litellm_request = {
@@ -644,7 +632,6 @@ def convert_anthropic_to_litellm(anthropic_request: MessagesRequest) -> Dict[str
             # Clean the schema if targeting a Gemini model
             input_schema = tool_dict.get("input_schema", {})
             if is_gemini_model:
-                 logger.debug(f"Cleaning schema for Gemini tool: {tool_dict.get('name')}")
                  input_schema = clean_gemini_schema(input_schema)
 
             # Create OpenAI-compatible function tool
@@ -723,15 +710,6 @@ def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any],
         # - The mapped model is using anthropic/ provider
         is_claude_model = is_claude_request or is_anthropic_request or is_anthropic_mapped
         
-        # Debug logging for model detection
-        logger.debug(f"🤖 CLAUDE MODEL DETECTION:")
-        logger.debug(f"   Original model: {original_model}")
-        logger.debug(f"   Clean original: {clean_original_model}")
-        logger.debug(f"   Mapped model: {mapped_model}")
-        logger.debug(f"   Is Claude request: {is_claude_request}")
-        logger.debug(f"   Is Anthropic request: {is_anthropic_request}")
-        logger.debug(f"   Is Anthropic mapped: {is_anthropic_mapped}")
-        logger.debug(f"   Final is_claude_model: {is_claude_model}")
         
         # Handle ModelResponse object from LiteLLM
         if hasattr(litellm_response, 'choices') and hasattr(litellm_response, 'usage'):
@@ -778,14 +756,12 @@ def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any],
         
         # Add tool calls if present (tool_use in Anthropic format) - only for Claude models
         if tool_calls and is_claude_model:
-            logger.debug(f"Processing tool calls: {tool_calls}")
             
             # Convert to list if it's not already
             if not isinstance(tool_calls, list):
                 tool_calls = [tool_calls]
                 
             for idx, tool_call in enumerate(tool_calls):
-                logger.debug(f"Processing tool call {idx}: {tool_call}")
                 
                 # Extract function data based on whether it's a dict or object
                 if isinstance(tool_call, dict):
@@ -807,7 +783,6 @@ def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any],
                         logger.warning(f"Failed to parse tool arguments as JSON: {arguments}")
                         arguments = {"raw": arguments}
                 
-                logger.debug(f"Adding tool_use block: id={tool_id}, name={name}, input={arguments}")
                 
                 content.append({
                     "type": "tool_use",
@@ -817,7 +792,6 @@ def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any],
                 })
         elif tool_calls and not is_claude_model:
             # For non-Claude models, convert tool calls to text format
-            logger.debug(f"Converting tool calls to text for non-Claude model: {clean_original_model}")
             
             # We'll append tool info to the text content
             tool_text = "\n\nTool usage:\n"
@@ -1192,21 +1166,6 @@ async def create_message(
         body_json = json.loads(body.decode('utf-8'))
         original_model = body_json.get("model", "unknown")
         
-        # Debug logging for Claude Code requests
-        logger.debug(f"🔍 RAW REQUEST from client:")
-        logger.debug(f"   Model: {original_model}")
-        logger.debug(f"   Messages count: {len(body_json.get('messages', []))}")
-        for i, msg in enumerate(body_json.get('messages', [])):
-            logger.debug(f"   Message {i} ({msg.get('role')}): {type(msg.get('content'))}")
-            if isinstance(msg.get('content'), list):
-                for j, block in enumerate(msg['content']):
-                    logger.debug(f"     Block {j}: {block.get('type')} - {str(block)[:150]}...")
-            elif isinstance(msg.get('content'), str):
-                logger.debug(f"     Content: {msg.get('content')[:100]}...")
-        if body_json.get('tools'):
-            logger.debug(f"   Tools: {[t.get('name') for t in body_json.get('tools', [])]}")
-        logger.debug(f"   Stream: {body_json.get('stream', False)}")
-        logger.debug(f"   Max tokens: {body_json.get('max_tokens')}")
         
         # Get the display name for logging, just the model name without provider prefix
         display_model = original_model
@@ -1220,7 +1179,6 @@ async def create_message(
         elif clean_model.startswith("openai/"):
             clean_model = clean_model[len("openai/"):]
         
-        logger.debug(f"📊 PROCESSING REQUEST: Model={request.model}, Stream={request.stream}")
         
         # Convert Anthropic request to LiteLLM format
         litellm_request = convert_anthropic_to_litellm(request)
@@ -1235,27 +1193,20 @@ async def create_message(
             # Add custom API base URL if provided
             if OPENAI_API_BASE:
                 litellm_request["api_base"] = OPENAI_API_BASE
-                logger.debug(f"Using custom OpenAI API base: {OPENAI_API_BASE}")
-            logger.debug(f"Using OpenAI API key for model: {request.model}")
         elif request.model.startswith("gemini/"):
             litellm_request["api_key"] = GEMINI_API_KEY
-            logger.debug(f"Using Gemini API key for model: {request.model}")
         elif request.model.startswith("anthropic/"):
             # For Anthropic models routed through litellm proxy, use OpenAI credentials
             litellm_request["api_key"] = OPENAI_API_KEY
             if OPENAI_API_BASE:
                 litellm_request["api_base"] = OPENAI_API_BASE
-                logger.debug(f"Using OpenAI API base for Anthropic model: {OPENAI_API_BASE}")
             # Force the provider to be openai so litellm uses OpenAI-compatible endpoints
             litellm_request["custom_llm_provider"] = "openai"
-            logger.debug(f"Using OpenAI credentials and provider for Anthropic model: {request.model}")
         else:
             litellm_request["api_key"] = ANTHROPIC_API_KEY
-            logger.debug(f"Using Anthropic API key for model: {request.model}")
         
         # For OpenAI models - modify request format to work with limitations
         if "openai" in litellm_request["model"] and "messages" in litellm_request:
-            logger.debug(f"Processing OpenAI model request: {litellm_request['model']}")
             
             # For OpenAI models, we need to convert content blocks to simple strings
             # and handle other requirements
@@ -1379,8 +1330,6 @@ async def create_message(
             
             # 3. Final validation - check for any remaining invalid values and dump full message details
             for i, msg in enumerate(litellm_request["messages"]):
-                # Log the message format for debugging
-                logger.debug(f"Message {i} format check - role: {msg.get('role')}, content type: {type(msg.get('content'))}")
                 
                 # If content is still a list or None, replace with placeholder
                 if isinstance(msg.get("content"), list):
@@ -1391,8 +1340,6 @@ async def create_message(
                     logger.warning(f"Message {i} has None content - replacing with placeholder")
                     litellm_request["messages"][i]["content"] = "..." # Fallback placeholder
         
-        # Only log basic info about the request, not the full details
-        logger.debug(f"Request for model: {litellm_request.get('model')}, stream: {litellm_request.get('stream', False)}")
         
         # Handle streaming mode
         if request.stream:
@@ -1438,25 +1385,10 @@ async def create_message(
             )
             start_time = time.time()
             litellm_response = litellm.completion(**litellm_request)
-            logger.debug(f"✅ RESPONSE RECEIVED: Model={litellm_request.get('model')}, Time={time.time() - start_time:.2f}s")
             
             # Convert LiteLLM response to Anthropic format
             anthropic_response = convert_litellm_to_anthropic(litellm_response, request)
             
-            # Debug the response being sent back to Claude Code
-            logger.debug(f"📤 RESPONSE to client:")
-            logger.debug(f"   Stop reason: {anthropic_response.stop_reason}")
-            logger.debug(f"   Content blocks: {len(anthropic_response.content)}")
-            for i, block in enumerate(anthropic_response.content):
-                if hasattr(block, 'type'):
-                    block_type = block.type
-                    if block_type == 'tool_use':
-                        logger.debug(f"     Block {i}: tool_use - {block.name} (ID: {block.id[:12]}...)")
-                    elif block_type == 'text':
-                        text_preview = block.text[:100] if hasattr(block, 'text') else str(block)[:100]
-                        logger.debug(f"     Block {i}: text - {text_preview}...")
-                else:
-                    logger.debug(f"     Block {i}: {type(block)} - {str(block)[:100]}...")
             
             return anthropic_response
                 
